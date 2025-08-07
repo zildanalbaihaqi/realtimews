@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Realtime TTS</title>
+</head>
+<body>
+  <h1>ElevenLabs Realtime TTS</h1>
+
+  <textarea id="textInput" rows="4" cols="60" placeholder="Enter text to speak..."></textarea><br />
+  <button id="start">Speak</button>
+
+  <script>
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    let socket;
+    let reconnectInterval = 1000;
+
+    const audioQueue = [];
+    let isPlaying = false;
+
+    function connectSocket() {
+      socket = new WebSocket(`ws://${location.host}`);
+
+      socket.onopen = () => {
+        console.log('[Client] WebSocket connected');
+      };
+
+      socket.onmessage = (event) => {
+        const base64Audio = event.data;
+        const audioData = Uint8Array.from(atob(base64Audio), c => c.charCodeAt(0));
+
+        // Skip very short (likely silent) chunks
+        if (audioData.length < 2000) {
+          console.log('[Client] Skipped silent chunk');
+          return;
+        }
+
+        audioQueue.push(audioData);
+        playNextChunk();
+      };
+
+      socket.onclose = () => {
+        console.warn('[Client] Socket closed. Reconnecting...');
+        setTimeout(connectSocket, reconnectInterval);
+      };
+
+      socket.onerror = (err) => {
+        console.error('[Client] Socket error:', err);
+        socket.close();
+      };
+    }
+
+    async function playNextChunk() {
+      if (isPlaying || audioQueue.length === 0) return;
+      isPlaying = true;
+
+      const chunk = audioQueue.shift();
+      try {
+        const audioBuffer = await audioContext.decodeAudioData(chunk.buffer);
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
+        source.start();
+
+        source.onended = () => {
+          isPlaying = false;
+          playNextChunk();
+        };
+
+        console.log('[Client] Playing chunk');
+      } catch (e) {
+        console.error('[Client] Audio decode error:', e);
+        isPlaying = false;
+        playNextChunk();
+      }
+    }
+
+    connectSocket();
+
+    document.getElementById('start').addEventListener('click', async () => {
+      await audioContext.resume();
+      const text = document.getElementById('textInput').value.trim();
+      if (!text) return alert('Please enter some text.');
+
+      if (socket.readyState === WebSocket.OPEN) {
+        audioQueue.length = 0;
+        isPlaying = false;
+        socket.send(JSON.stringify({ text }));
+        console.log('[Client] Sent text to server');
+      } else {
+        console.warn('[Client] Socket not ready:', socket.readyState);
+      }
+    });
+  </script>
+</body>
+</html>
