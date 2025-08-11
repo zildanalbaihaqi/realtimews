@@ -5,7 +5,8 @@ export interface ParsedMessage {
     | "ping"
     | "session.created"
     | "response.done"
-    | "session.updated";
+    | "session.updated"
+    | "response.output_item.added";
   id?: string;
   content?: string;
   // optional field to include full data on done
@@ -42,6 +43,11 @@ export function parseOpenAIMessage(
           type: "session.updated",
           rawData: data, // simpen data lengkap di rawData
         };
+              case "response.output_item.added":
+        return {
+          type: "response.output_item.added",
+          rawData: data, // simpen data lengkap di rawData
+        };        
       case "ping":
         return { type: "ping" };
 
