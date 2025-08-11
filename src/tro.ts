@@ -43,91 +43,70 @@ export default function handleConnection(clientSocket: WebSocket): void {
     currentTTSTurnId = null;
   }
 
-function startTTS(text: string, turnId: string) {
-  const ttsWs = new WebSocket(
-    `wss://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream-input?model_id=${MODEL_ID}&output_format=pcm_16000&sync_alignment=true`,
-    {
-      headers: {
-        "xi-api-key": ELEVENLABS_API_KEY,
-      },
-    }
-  );
-
-  currentTTS = ttsWs;
-  currentTTSTurnId = turnId;
-  lastTTSId = turnId;
-
-  let keepAliveTimer: NodeJS.Timeout | null = null;
-
-  ttsWs.on("open", () => {
-    console.log(`[TTS] Started (${turnId})`);
-
-    // Kirim konfigurasi awal
-    ttsWs.send(JSON.stringify({
-      text: " ",
-      voice_settings: {
-        stability: 0.3,
-        similarity_boost: 0.3,
-        use_speaker_boost: false,
-      },
-      generation_config: {
-        chunk_length_schedule: [80, 120, 150],
-      },
-    }));
-
-    // Kirim teks utama
-    ttsWs.send(JSON.stringify({ text, flush: true }));
-
-    // Keep-alive setiap 15 detik
-    keepAliveTimer = setInterval(() => {
-      if (ttsWs.readyState === WebSocket.OPEN) {
-        ttsWs.send(JSON.stringify({ text: " " }));
-        // console.log("[TTS] Keep-alive sent");
+  function startTTS(text: string, turnId: string) {
+    const ttsWs = new WebSocket(
+      `wss://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream-input?model_id=${MODEL_ID}&output_format=pcm_16000&sync_alignment=true`,
+      {
+        headers: {
+          "xi-api-key": ELEVENLABS_API_KEY,
+        },
       }
-    }, 15000);
-  });
+    );
 
-  ttsWs.on("message", (event) => {
-    try {
-      const data = JSON.parse(event.toString());
-      if (
-        data.audio &&
-        ttsWs === currentTTS &&
-        currentTTSTurnId === turnId
-      ) {
-        clientSocket.send(JSON.stringify({
-          type: "tts_audio",
-          audio: data.audio,
-          turnId,
-        }));
+    currentTTS = ttsWs;
+    currentTTSTurnId = turnId;
+    lastTTSId = turnId;
+
+    ttsWs.on("open", () => {
+      console.log(`[TTS] Started (${turnId})`);
+
+      ttsWs.send(JSON.stringify({
+        text: " ",
+        voice_settings: {
+          stability: 0.3,
+          similarity_boost: 0.3,
+          use_speaker_boost: false,
+        },
+        generation_config: {
+          chunk_length_schedule: [80, 120, 150],
+        },
+      }));
+
+      ttsWs.send(JSON.stringify({ text, flush: true }));
+      ttsWs.send(JSON.stringify({ text: "" }));
+    });
+
+    ttsWs.on("message", (event) => {
+      try {
+        const data = JSON.parse(event.toString());
+        if (
+          data.audio &&
+          ttsWs === currentTTS &&
+          currentTTSTurnId === turnId
+        ) {
+          clientSocket.send(JSON.stringify({
+            type: "tts_audio",
+            audio: data.audio,
+            turnId,
+          }));
+        }
+      } catch (err) {
+        console.error("[TTS] Message parse error:", err);
       }
-    } catch (err) {
-      console.error("[TTS] Message parse error:", err);
-    }
-  });
+    });
 
-  const cleanupKeepAlive = () => {
-    if (keepAliveTimer) {
-      clearInterval(keepAliveTimer);
-      keepAliveTimer = null;
-    }
-  };
+    ttsWs.on("close", () => {
+      console.log(`[TTS] Closed (${turnId})`);
+      if (currentTTS === ttsWs) {
+        currentTTS = null;
+        currentTTSTurnId = null;
+      }
+    });
 
-  ttsWs.on("close", () => {
-    console.log(`[TTS] Closed (${turnId})`);
-    cleanupKeepAlive();
-    if (currentTTS === ttsWs) {
-      currentTTS = null;
-      currentTTSTurnId = null;
-    }
-  });
-
-  ttsWs.on("error", (err) => {
-    console.error("[TTS] WS error:", err.message);
-    cleanupKeepAlive();
-  });
-}
-
+    ttsWs.on("error", (err) => {
+      console.error("[TTS] WS error:", err.message);
+    });
+  }
 
   openaiSocket.on("open", () => {
     console.log("[OpenAI] Connected");
@@ -203,7 +182,7 @@ function startTTS(text: string, turnId: string) {
         stopTTS(turnId);
       }
 
-      console.log("[Frontend] Transcript received:", transcript);
+      console.log("📩 [Frontend] Transcript received:", transcript);
       sendOpenAIMessage(openaiSocket, transcript);
       clientSocket.send(JSON.stringify({ type: "transcript", text: transcript, turnId }));
     }
