@@ -32,6 +32,11 @@ export default function handleConnection(clientSocket: WebSocket): void {
   let lastTTSId: string | null = null;
   let lastBargedTurnId: string | null = null;
   const sessionInitialized = { current: false };
+  let ttsFirstAudioReceivedTime: number | null = null;
+let llmFirstPartialTime: number | null = null;
+let llmFinalTextTime: number | null = null;
+let userTranscriptReceivedTime: number | null = null;
+let ttsStartTime: number | null = null;
 
   function stopTTS(turnId: string) {
     if (currentTTS && currentTTS.readyState === WebSocket.OPEN) {
@@ -42,8 +47,15 @@ export default function handleConnection(clientSocket: WebSocket): void {
     currentTTS = null;
     currentTTSTurnId = null;
   }
+function safeSend(ws: WebSocket | null, data: any) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(data));
+  } else {
+    console.warn("[safeSend] WS not open, skipping send");
+  }
+}
 
-  function startTTS(text: string, turnId: string) {
+  function startTTS(text: string, turnId: string, flush = false) {
     const ttsWs = new WebSocket(
       `wss://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream-input?model_id=${MODEL_ID}&output_format=pcm_16000&sync_alignment=true`,
       {
@@ -59,7 +71,7 @@ export default function handleConnection(clientSocket: WebSocket): void {
 
     ttsWs.on("open", () => {
       console.log(`[TTS] Started (${turnId})`);
-
+ttsFirstAudioReceivedTime = null
       ttsWs.send(JSON.stringify({
         text: " ",
         voice_settings: {
@@ -68,28 +80,53 @@ export default function handleConnection(clientSocket: WebSocket): void {
           use_speaker_boost: false,
         },
         generation_config: {
-          chunk_length_schedule: [80, 120, 150],
+          chunk_length_schedule: [50,80,120],
         },
       }));
 
-      ttsWs.send(JSON.stringify({ text, flush: true }));
-      ttsWs.send(JSON.stringify({ text: "" }));
+    // Kirim text dengan flush sesuai param
+    ttsWs.send(JSON.stringify({ text, flush }));
+
+    // Kalau flush false, jangan kirim text kosong (biar connection tetap streaming)
+    if (flush) {
+      ttsWs.send(JSON.stringify({ text: " " }));
+    }
     });
 
     ttsWs.on("message", (event) => {
       try {
         const data = JSON.parse(event.toString());
+        console.log(`[TTS] received (turn ${turnId})`);
         if (
           data.audio &&
           ttsWs === currentTTS &&
           currentTTSTurnId === turnId
         ) {
+                if (!ttsFirstAudioReceivedTime) {
+        ttsFirstAudioReceivedTime = performance.now();
+        if (ttsStartTime) {
+          console.log(`[Latency] TTS start → first audio chunk: ${(ttsFirstAudioReceivedTime - ttsStartTime).toFixed(0)} ms`);
+        }
+      }
           clientSocket.send(JSON.stringify({
             type: "tts_audio",
             audio: data.audio,
             turnId,
           }));
         }
+
+            if ((data.alignment || data.normalizedAlignment) && ttsWs === currentTTS) {
+      const alignment = data.normalizedAlignment || data.alignment;
+      clientSocket.send(
+        JSON.stringify({
+          type: "tts_alignment",
+          alignment,
+          turnId,
+        })
+      );
+
+      
+    }
       } catch (err) {
         console.error("[TTS] Message parse error:", err);
       }
@@ -100,6 +137,7 @@ export default function handleConnection(clientSocket: WebSocket): void {
       if (currentTTS === ttsWs) {
         currentTTS = null;
         currentTTSTurnId = null;
+        ttsFirstAudioReceivedTime = null
       }
     });
 
@@ -110,7 +148,13 @@ export default function handleConnection(clientSocket: WebSocket): void {
 
   openaiSocket.on("open", () => {
     console.log("[OpenAI] Connected");
+          if (!currentTTS) {
+    // Buat TTS baru tapi jangan langsung kirim teks ke TTS di sini
+    startTTS(' ', '');
+  }
+  if (currentTTS){
     clientSocket.send(JSON.stringify({ type: "openai_ready" }));
+  }
     clientSocket.on("message", async (msg: RawData) => {
       try {
         const str = (typeof msg === "string" ? msg : msg.toString()).trim();
@@ -125,56 +169,82 @@ export default function handleConnection(clientSocket: WebSocket): void {
       }
     });
 
-    openaiSocket.on("message", async (msg: RawData) => {
-      const parsed = parseOpenAIMessage(msg.toString());
-      if (!parsed || clientSocket.readyState !== WebSocket.OPEN) return;
-/*
-      if (parsed.type === "text_delta" && parsed.content) {
-        clientSocket.send(JSON.stringify({
-          type: "partial_response",
-          text: parsed.content,
-          turnId: activeTurnId,
-        }));
-      }
-*/
-      if (parsed.type === "text_done" && parsed.content) {
-        const turnId = activeTurnId || uuidv4();
-        clientSocket.send(JSON.stringify({
-          type: "final_response",
-          text: parsed.content,
-          turnId,
-        }));
 
-        lastBargedTurnId = null;
-        startTTS(parsed.content, turnId);
-      }
 
-      if (parsed.type === "ping") {
-        clientSocket.send(JSON.stringify({ type: "ping" }));
+openaiSocket.on("message", async (msg: RawData) => {
+  const parsed = parseOpenAIMessage(msg.toString());
+  if (!parsed || clientSocket.readyState !== WebSocket.OPEN) return;
+
+  if (parsed.type === "text_delta" && parsed.content) {
+    // Kirim partial text ke TTS tanpa flush
+    if (!llmFirstPartialTime) {
+      llmFirstPartialTime = performance.now();
+      if (userTranscriptReceivedTime) {
+        console.log(`[Latency] User transcript → LLM first partial: ${(llmFirstPartialTime - userTranscriptReceivedTime).toFixed(0)} ms`);
       }
-       if (parsed.type === "response.done") {
-        console.log(JSON.stringify(parsed ,null, 2));
-        const out = parsed.rawData;
-        clientSocket.send(JSON.stringify(out));
-      }
-       if (parsed.type === "response.output_item.added") {
-        console.log(JSON.stringify(parsed ,null, 2));
-        const out = parsed.rawData;
-        clientSocket.send(JSON.stringify(out));
-      }      
-        if (parsed.type === "session.updated") {
-        //console.log(JSON.stringify(parsed ,null, 2));
-        const out = parsed.rawData;
-        clientSocket.send(JSON.stringify(out));
-      }         
-    });
+    }
+    console.log(`[LLM] Partial text received: "${parsed.content}"`);
+    clientSocket.send(JSON.stringify({
+      type: "partial_response",
+      text: parsed.content,
+      turnId: activeTurnId,
+    }));
+
+    // Kirim partial text ke TTS tanpa flush
+
+              if (!currentTTS) {
+    // Buat TTS baru tapi jangan langsung kirim teks ke TTS di sini
+    startTTS(' ', '');
+  }
+    //startTTS(parsed.content, activeTurnId!, false); // flush false di partial
+   else if (currentTTSTurnId === activeTurnId) {
+    safeSend(currentTTS, { text: parsed.content, flush: false });
+
+  }
+  }
+
+  if (parsed.type === "text_done" && parsed.content) {
+    llmFinalTextTime = performance.now();
+    if (llmFirstPartialTime) {
+      console.log(`[Latency] LLM first partial → final text: ${(llmFinalTextTime - llmFirstPartialTime).toFixed(0)} ms`);
+    }
+    console.log(`[LLM] Final text received (turnId: ${activeTurnId}): "${parsed.content}"`);
+
+    const turnId = activeTurnId || uuidv4();
+    clientSocket.send(JSON.stringify({
+      type: "final_response",
+      text: parsed.content,
+      turnId,
+    }));
+
+    lastBargedTurnId = null;
+    console.log(`[TTS] Flushing TTS for turnId ${turnId}`);
+
+    ttsStartTime = performance.now();
+  if (currentTTS && currentTTSTurnId === activeTurnId) {
+    safeSend(currentTTS, { text: parsed.content, flush: false });// flush true di done
+  } else {
+    startTTS(parsed.content, activeTurnId!, true); // kalau koneksi belum ada, start dengan flush true
+  }
+
+    if (llmFinalTextTime && ttsStartTime) {
+      console.log(`[Latency] LLM final text → TTS flush: ${(ttsStartTime - llmFinalTextTime).toFixed(0)} ms`);
+    }
+
+    // Reset LLM times after turn done
+    llmFirstPartialTime = null;
+    llmFinalTextTime = null;
+  }
+});
+
+
   });
 
   function handleClientJsonMessage(data: any) {
     if (data.type === "transcript") {
       const transcript = data.transcript?.trim();
       if (!transcript) return;
-
+userTranscriptReceivedTime = performance.now();
       const turnId = uuidv4();
       activeTurnId = turnId;
 
