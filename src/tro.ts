@@ -175,7 +175,9 @@ ttsFirstAudioReceivedTime = null
 openaiSocket.on("message", async (msg: RawData) => {
   const parsed = parseOpenAIMessage(msg.toString());
   if (!parsed || clientSocket.readyState !== WebSocket.OPEN) return;
-
+  if (parsed.type === 'session.updated'){
+    clientSocket.send(JSON.stringify({ type: "session.updated" }));
+  }
   if (parsed.type === "text_delta" && parsed.content) {
     // Kirim partial text ke TTS tanpa flush
     if (!llmFirstPartialTime) {
@@ -311,3 +313,4 @@ Greet the user and assist them in a concise and helpful manner.
   clientSocket.on("close", cleanup);
   openaiSocket.on("close", cleanup);
 }
+
