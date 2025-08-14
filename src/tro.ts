@@ -97,6 +97,18 @@ ttsFirstAudioReceivedTime = null
       try {
         const data = JSON.parse(event.toString());
         console.log(`[TTS] received (turn ${turnId})`);
+             if ((data.alignment || data.normalizedAlignment) && ttsWs === currentTTS) {
+      const alignment = data.normalizedAlignment || data.alignment;
+      clientSocket.send(
+        JSON.stringify({
+          type: "tts_alignment",
+          alignment,
+          turnId,
+        })
+      );
+
+      
+    }       
         if (
           data.audio &&
           ttsWs === currentTTS &&
@@ -115,18 +127,7 @@ ttsFirstAudioReceivedTime = null
           }));
         }
 
-            if ((data.alignment || data.normalizedAlignment) && ttsWs === currentTTS) {
-      const alignment = data.normalizedAlignment || data.alignment;
-      clientSocket.send(
-        JSON.stringify({
-          type: "tts_alignment",
-          alignment,
-          turnId,
-        })
-      );
 
-      
-    }
       } catch (err) {
         console.error("[TTS] Message parse error:", err);
       }
