@@ -242,21 +242,34 @@ openaiSocket.on("message", async (msg: RawData) => {
   });
 
   function handleClientJsonMessage(data: any) {
-    if (data.type === "transcript") {
-      const transcript = data.transcript?.trim();
-      if (!transcript) return;
-userTranscriptReceivedTime = performance.now();
-      const turnId = uuidv4();
-      activeTurnId = turnId;
+if (data.type === "transcript") {
+  const transcript = data.transcript?.trim();
+  if (!transcript) return;
 
-      if (currentTTS && currentTTS.readyState === WebSocket.OPEN) {
-        stopTTS(turnId);
-      }
+  userTranscriptReceivedTime = performance.now();
+  const turnId = uuidv4();
+  activeTurnId = turnId;
 
-      console.log("📩 [Frontend] Transcript received:", transcript);
-      sendOpenAIMessage(openaiSocket, transcript);
-      clientSocket.send(JSON.stringify({ type: "transcript", text: transcript, turnId }));
-    }
+  if (currentTTS && currentTTS.readyState === WebSocket.OPEN) {
+    stopTTS(turnId);
+  }
+
+  // 🔥 Prewarm TTS di sini
+  if (!currentTTS) {
+    console.log("[TTS] Prewarming connection...");
+    startTTS(" ", "");
+  }
+
+  console.log("📩 [Frontend] Transcript received:", transcript);
+  sendOpenAIMessage(openaiSocket, transcript);
+
+  clientSocket.send(JSON.stringify({
+    type: "transcript",
+    text: transcript,
+    turnId
+  }));
+}
+
 
     if (data.type === 'session.update' || data.type === 'conversation.item.create' ||
         data.type === 'response.create'
